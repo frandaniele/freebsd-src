@@ -72,6 +72,13 @@
 #include <sys/umtxvar.h>
 #include <sys/vnode.h>
 #include <sys/wait.h>
+
+//
+#include <sys/syslog.h>
+MALLOC_DECLARE(M_AUDITTEXT_ARGS);
+MALLOC_DEFINE( M_AUDITTEXT_ARGS, "audittext_args", "Memory for copy args and print them" );
+//
+
 #ifdef KTRACE
 #include <sys/ktrace.h>
 #endif
@@ -227,10 +234,20 @@ sys_execve(struct thread *td, struct execve_args *uap)
 		return (error);
 	error = exec_copyin_args(&args, uap->fname, UIO_USERSPACE,
 	    uap->argv, uap->envv);
+    
+	//va aca porque se necesita copyinstr/copystr de execve_args
+	//log(LOG_INFO, "\n1) ** NEW EXECVE CALL ** sys_execve() ** has been called for: %s\n", args.fname);
+	
 	if (error == 0)
 		error = kern_execve(td, &args, NULL, oldvmspace);
 	post_execve(td, error, oldvmspace);
+
+	//log(LOG_INFO, "1) ** ENDING OF EXECVE CALL ** sys_execve() EXIT ** // sys_execve() // THREAD NAME: %s", td->td_name);
+
+	//log(LOG_INFO, " - ASSOCIATED PROCESS NAME: %s\n", td->td_proc->p_comm);	
+
 	AUDIT_SYSCALL_EXIT(error == EJUSTRETURN ? 0 : error, td);
+
 	return (error);
 }
 
@@ -411,7 +428,7 @@ do_execve(struct thread *td, struct image_args *args, struct mac *mac_p,
 	size_t freepath_size;
 	static const char fexecv_proc_title[] = "(fexecv)";
 
-	imgp = &image_params;
+	imgp = &image_params; // referencio a image_params
 	oldtextvp = oldtextdvp = NULL;
 	newtextvp = newtextdvp = NULL;
 	newbinname = oldbinname = NULL;
@@ -436,10 +453,10 @@ do_execve(struct thread *td, struct image_args *args, struct mac *mac_p,
 	 * Initialize part of the common data
 	 */
 	bzero(imgp, sizeof(*imgp));
-	imgp->proc = p;
-	imgp->attr = &attr;
-	imgp->args = args;
-	oldcred = p->p_ucred;
+	imgp->proc = p;				// Guardo proceso
+	imgp->attr = &attr;			// Referencio atributos
+	imgp->args = args;			// Guardo atributos pasados por terminal
+	oldcred = p->p_ucred;		// Guardo identidad del owner del proceso
 	orig_osrel = p->p_osrel;
 	orig_fctl0 = p->p_fctl0;
 	orig_brandinfo = p->p_elf_brandinfo;
@@ -479,14 +496,14 @@ interpret:
 		if (error)
 			goto exec_fail;
 
-		newtextvp = nd.ni_vp;
+		newtextvp = nd.ni_vp;	// Asigno el vnodo resultante de traduccion anterior
 		newtextdvp = nd.ni_dvp;
 		nd.ni_dvp = NULL;
 		newbinname = malloc(nd.ni_cnd.cn_namelen + 1, M_PARGS,
 		    M_WAITOK);
 		memcpy(newbinname, nd.ni_cnd.cn_nameptr, nd.ni_cnd.cn_namelen);
 		newbinname[nd.ni_cnd.cn_namelen] = '\0';
-		imgp->vp = newtextvp;
+		imgp->vp = newtextvp;	// cargo en imagen del proceso
 
 		/*
 		 * Do the best to calculate the full path to the image file.
@@ -593,7 +610,7 @@ interpret:
 	if (credential_changing)
 		imgp->proc->p_pdeathsig = 0;
 
-	if (credential_changing &&
+	if (credential_changing && // Si se requiere cambiar las credenciales
 #ifdef CAPABILITY_MODE
 	    ((oldcred->cr_flags & CRED_FLAG_CAPMODE) == 0) &&
 #endif
@@ -604,11 +621,11 @@ interpret:
 		imgp->newcred = crdup(oldcred);
 		if (attr.va_mode & S_ISUID) {
 			euip = uifind(attr.va_uid);
-			change_euid(imgp->newcred, euip);
+			change_euid(imgp->newcred, euip); //	Cambiar el UID efectivo del proceso
 		}
 		vn_lock(imgp->vp, LK_SHARED | LK_RETRY);
 		if (attr.va_mode & S_ISGID)
-			change_egid(imgp->newcred, attr.va_gid);
+			change_egid(imgp->newcred, attr.va_gid); //	Cambiar el UGD efectivo del proceso
 		/*
 		 * Implement correct POSIX saved-id behavior.
 		 *
@@ -656,12 +673,12 @@ interpret:
 	 *	An activator returns -1 if there is no match, 0 on success,
 	 *	and an error otherwise.
 	 */
-	for (i = 0; error == -1 && execsw[i]; ++i) {
+	for (i = 0; error == -1 && execsw[i]; ++i) { // execsw = estructura que contiene cada activador de imagen.
 		if (execsw[i]->ex_imgact == NULL ||
 		    execsw[i]->ex_imgact == img_first) {
 			continue;
 		}
-		error = (*execsw[i]->ex_imgact)(imgp);
+		error = (*execsw[i]->ex_imgact)(imgp); // CALL THE IMAGE ACTIVATOR
 	}
 
 	if (error) {
@@ -675,7 +692,7 @@ interpret:
 	 * activate the interpreter.
 	 */
 	if (imgp->interpreted) {
-		exec_unmap_first_page(imgp);
+		exec_unmap_first_page(imgp); // libero buffers
 		/*
 		 * The text reference needs to be removed for scripts.
 		 * There is a short period before we determine that
@@ -684,7 +701,7 @@ interpret:
 		 * so nothing should illegitimately be blocked.
 		 */
 		MPASS(imgp->textset);
-		VOP_UNSET_TEXT_CHECKED(newtextvp);
+		VOP_UNSET_TEXT_CHECKED(newtextvp); // libero lock de escritura sobre objeto
 		imgp->textset = false;
 		/* free name buffer and old vnode */
 #ifdef MAC
@@ -694,7 +711,7 @@ interpret:
 			VOP_CLOSE(newtextvp, FREAD, td->td_ucred, td);
 			imgp->opened = false;
 		}
-		vput(newtextvp);
+		vput(newtextvp); // Desbloqueo el vnodo
 		imgp->vp = newtextvp = NULL;
 		if (args->fname != NULL) {
 			if (newtextdvp != NULL) {
@@ -705,7 +722,7 @@ interpret:
 			free(newbinname, M_PARGS);
 			newbinname = NULL;
 		}
-		vm_object_deallocate(imgp->object);
+		vm_object_deallocate(imgp->object); // Desreferencio el objeto previamente tomado
 		imgp->object = NULL;
 		execve_nosetid(imgp);
 		imgp->execpath = NULL;
@@ -884,7 +901,7 @@ interpret:
 	 * Set the new credentials.
 	 */
 	if (imgp->newcred != NULL) {
-		proc_set_cred(p, imgp->newcred);
+		proc_set_cred(p, imgp->newcred); // Cargar las nuevas credenciales 
 		crfree(oldcred);
 		oldcred = NULL;
 	}
@@ -894,7 +911,7 @@ interpret:
 	 * referenced by namei() or by fexecve variant of fname handling.
 	 */
 	oldtextvp = p->p_textvp;
-	p->p_textvp = newtextvp;
+	p->p_textvp = newtextvp; // guardo el vnodo del ejecutable
 	oldtextdvp = p->p_textdvp;
 	p->p_textdvp = newtextdvp;
 	newtextdvp = NULL;
