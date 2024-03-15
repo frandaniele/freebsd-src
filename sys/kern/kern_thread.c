@@ -98,9 +98,9 @@ _Static_assert(offsetof(struct proc, p_pid) == 0xc4,
     "struct proc KBI p_pid");
 _Static_assert(offsetof(struct proc, p_filemon) == 0x3c8,
     "struct proc KBI p_filemon");
-_Static_assert(offsetof(struct proc, p_comm) == 0x3e0,
+_Static_assert(offsetof(struct proc, p_comm) == 0x3f8,
     "struct proc KBI p_comm");
-_Static_assert(offsetof(struct proc, p_emuldata) == 0x4d0,
+_Static_assert(offsetof(struct proc, p_emuldata) == 0x4e8,
     "struct proc KBI p_emuldata");
 #endif
 #ifdef __i386__

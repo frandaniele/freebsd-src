@@ -31,6 +31,7 @@
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <sys/cdefs.h>
 #include "opt_capsicum.h"
 
 #include <sys/param.h>
@@ -68,6 +69,7 @@
 #include <sys/syslog.h>
 #include <sys/eventhandler.h>
 #include <sys/user.h>
+#include <sys/metadata_elf_reader.h>
 
 #include <vm/vm.h>
 #include <vm/vm_kern.h>
@@ -1121,6 +1123,25 @@ __CONCAT(exec_, __elfN(imgact))(struct image_params *imgp)
 	    (hdr->e_type != ET_EXEC && hdr->e_type != ET_DYN))
 		return (-1);
 
+	/* 1) Call getMetadataSectionPayload() function and print metadata
+		Iterate over ELF executable file of the process. 
+	
+		Values of returned_flag:
+		-1: error in retrieving metadata (allocation problems, etc).
+		1: metadata section was found in ELF and section data correctly retrieved.
+		2: metadata section was not found in ELF.
+
+	*/
+	int returned_flag = 0;
+	size_t payload_size = 0;
+	void* ELFmetadata = getMetadataSectionPayload(hdr, imgp, &returned_flag, &payload_size);
+
+	//log(LOG_INFO, "\t1) // __CONCAT(exec_, __elfN(imgact)) // LectorELF // -- *** METADATA: %p -- PAYLOAD SIZE: %lu -- RETURNED FLAG: %d ***\n", ELFmetadata, payload_size , returned_flag);
+	if (ELFmetadata == NULL && returned_flag == -1) {
+		//log(LOG_INFO, "\t1) // __CONCAT(exec_, __elfN(imgact)) // LectorELF // -- ERROR getMetadataSectionPayload()\n");
+		return (ENOEXEC);
+	}
+
 	/*
 	 * From here on down, we return an errno, not -1, as we've
 	 * detected an ELF file.
@@ -1144,6 +1165,18 @@ __CONCAT(exec_, __elfN(imgact))(struct image_params *imgp)
 	interp = NULL;
 	free_interp = false;
 	td = curthread;
+
+	/* * METADATA: Assign metadata returned flag to proc struct */
+	td->td_proc->p_metadata_section_flag = returned_flag; //redundant? its copied below
+
+	if (returned_flag == 1) {
+		/* COPY ADDRESS OF THE ALLOCATED SPACE CONTAINING THE METADATA, THE RETURNED FLAG OF ITS SEARCH AND THE SIZE OF THE METADATA SECTION 
+		TO THE PROC STRUCT ASSOCIATED TO THE ACTUAL THREAD*/
+		copyMetadataToProc(ELFmetadata, returned_flag, payload_size, td);
+	
+		/* DECODE THE METADATA SENT IN ELF AND PRINT THE VALUES OF THE PAYLOAD STRUCT MEMBERS*/
+		//decodeMetadataSectionThread(td);
+	}
 
 	/*
 	 * Somewhat arbitrary, limit accepted max alignment for the
