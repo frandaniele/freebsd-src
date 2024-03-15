@@ -45,6 +45,7 @@
 #include <sys/resourcevar.h>
 #include <sys/sdt.h>
 #include <sys/smp.h>
+#include <sys/sched_petri.h>
 #include <sys/sched.h>
 #include <sys/sleepqueue.h>
 #include <sys/selinfo.h>
@@ -802,6 +803,7 @@ thread_alloc(int pages)
 	kmsan_thread_alloc(td);
 	cpu_thread_alloc(td);
 	EVENTHANDLER_DIRECT_INVOKE(thread_ctor, td);
+	init_petri_thread(td);
 	return (td);
 }
 
