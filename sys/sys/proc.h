@@ -739,6 +739,9 @@ struct proc {
 	int		p_pendingexits; /* (c) Count of pending thread exits. */
 	struct filemon	*p_filemon;	/* (c) filemon-specific data. */
 	int		p_pdeathsig;	/* (c) Signal from parent on exit. */
+	void	*p_metadata_addr;			/* Address of the allocated data from metadata section */
+	u_long 	p_metadata_size;				/* Size of the whole metadata section */
+	int 	p_metadata_section_flag;		/* Flag of metadata section presence in executable */
 /* End area that is zeroed on creation. */
 #define	p_endzero	p_magic
 
