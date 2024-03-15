@@ -35,6 +35,8 @@
  */
 
 #include <sys/cdefs.h>
+__FBSDID("$FreeBSD$");
+
 #include "opt_hwpmc_hooks.h"
 #include "opt_sched.h"
 
@@ -49,6 +51,7 @@
 #include <sys/proc.h>
 #include <sys/resourcevar.h>
 #include <sys/sched.h>
+#include <sys/sched_petri.h>
 #include <sys/sdt.h>
 #include <sys/smp.h>
 #include <sys/sysctl.h>
@@ -638,7 +641,7 @@ sched_setup(void *dummy)
 {
 
 	setup_runqs();
-
+	init_resource_net();
 	/* Account for thread0. */
 	sched_load_add();
 }
@@ -674,6 +677,7 @@ schedinit(void)
 	thread0.td_lock = &sched_lock;
 	td_get_sched(&thread0)->ts_slice = sched_slice;
 	mtx_init(&sched_lock, "sched lock", NULL, MTX_SPIN);
+	init_petri_thread0(&thread0);
 }
 
 void
@@ -985,13 +989,9 @@ sched_switch(struct thread *td, int flags)
 {
 	struct thread *newtd;
 	struct mtx *tmtx;
-	struct td_sched *ts;
-	struct proc *p;
 	int preempted;
 
 	tmtx = &sched_lock;
-	ts = td_get_sched(td);
-	p = td->td_proc;
 
 	THREAD_LOCK_ASSERT(td, MA_OWNED);
 
@@ -1001,6 +1001,19 @@ sched_switch(struct thread *td, int flags)
 	td->td_flags &= ~(TDF_NEEDRESCHED | TDF_SLICEEND);
 	td->td_owepreempt = 0;
 	td->td_oncpu = NOCPU;
+
+	/* 
+	 * Switch to the sched lock to fix things up and pick
+	 * a new thread.  Block the td_lock in order to avoid
+	 * breaking the critical path.
+	 */
+	if (td->td_lock != &sched_lock) {
+		mtx_lock_spin(&sched_lock);
+		tmtx = thread_lock_block(td);
+		mtx_unlock_spin(tmtx);
+	}
+
+	resource_expulse_thread(td, flags, "sched_switch");
 
 	/*
 	 * At the last moment, if this thread is still marked RUNNING,
@@ -1016,20 +1029,10 @@ sched_switch(struct thread *td, int flags)
 	} else {
 		if (TD_IS_RUNNING(td)) {
 			/* Put us back on the run queue. */
-			sched_add(td, SRQ_HOLDTD | SRQ_OURSELF | SRQ_YIELDING |
-			    (preempted ? SRQ_PREEMPTED : 0));
+			sched_add(td, preempted ?
+			    SRQ_HOLDTD|SRQ_OURSELF|SRQ_YIELDING|SRQ_PREEMPTED :
+			    SRQ_HOLDTD|SRQ_OURSELF|SRQ_YIELDING);
 		}
-	}
-
-	/* 
-	 * Switch to the sched lock to fix things up and pick
-	 * a new thread.  Block the td_lock in order to avoid
-	 * breaking the critical path.
-	 */
-	if (td->td_lock != &sched_lock) {
-		mtx_lock_spin(&sched_lock);
-		tmtx = thread_lock_block(td);
-		mtx_unlock_spin(tmtx);
 	}
 
 	if ((td->td_flags & TDF_NOLOAD) == 0)
@@ -1037,6 +1040,7 @@ sched_switch(struct thread *td, int flags)
 
 	newtd = choosethread();
 	MPASS(newtd->td_lock == &sched_lock);
+	resource_fire_net(newtd, TRANSITION(PCPU_GET(cpuid), TRAN_EXEC), "sched_switch");
 
 #if (KTR_COMPILE & KTR_SCHED) != 0
 	if (TD_IS_IDLETHREAD(td))
@@ -1256,26 +1260,17 @@ kick_other_cpu(int pri, int cpuid)
 static int
 sched_pickcpu(struct thread *td)
 {
-	int best, cpu;
+	int transition, cpu;
 
 	mtx_assert(&sched_lock, MA_OWNED);
-
-	if (td->td_lastcpu != NOCPU && THREAD_CAN_SCHED(td, td->td_lastcpu))
-		best = td->td_lastcpu;
+	transition = resource_choose_cpu(td);
+	if (transition == TRAN_QUEUE_GLOBAL)
+		cpu = NOCPU;
 	else
-		best = NOCPU;
-	CPU_FOREACH(cpu) {
-		if (!THREAD_CAN_SCHED(td, cpu))
-			continue;
-
-		if (best == NOCPU)
-			best = cpu;
-		else if (runq_length[cpu] < runq_length[best])
-			best = cpu;
-	}
-	KASSERT(best != NOCPU, ("no valid CPUs"));
-
-	return (best);
+		cpu = (int)(transition / CPU_BASE_TRANSITIONS);
+	
+	KASSERT(cpu == NOCPU, ("no valid CPUs"));
+	return (cpu);
 }
 #endif
 
@@ -1319,6 +1314,7 @@ sched_add(struct thread *td, int flags)
 	}
 	TD_SET_RUNQ(td);
 
+	wakeup_if_needed(td);
 	/*
 	 * If SMP is started and the thread is pinned or otherwise limited to
 	 * a specific set of CPUs, queue the thread to a per-CPU run queue.
@@ -1330,27 +1326,31 @@ sched_add(struct thread *td, int flags)
 	 */
 	if (smp_started && (td->td_pinned != 0 || td->td_flags & TDF_BOUND ||
 	    ts->ts_flags & TSF_AFFINITY)) {
-		if (td->td_pinned != 0)
+		if (td->td_pinned != 0) 
 			cpu = td->td_lastcpu;
 		else if (td->td_flags & TDF_BOUND) {
 			/* Find CPU from bound runq. */
 			KASSERT(SKE_RUNQ_PCPU(ts),
 			    ("sched_add: bound td_sched not on cpu runq"));
 			cpu = ts->ts_runq - &runq_pcpu[0];
-		} else
+		} else 
 			/* Find a valid CPU for our cpuset */
 			cpu = sched_pickcpu(td);
+
 		ts->ts_runq = &runq_pcpu[cpu];
 		single_cpu = 1;
 		CTR3(KTR_RUNQ,
 		    "sched_add: Put td_sched:%p(td:%p) on cpu%d runq", ts, td,
 		    cpu);
+
+		resource_fire_net(td, TRANSITION(cpu, TRAN_ADDTOQUEUE), "sched_add");
 	} else {
 		CTR2(KTR_RUNQ,
 		    "sched_add: adding td_sched:%p (td:%p) to gbl runq", ts,
 		    td);
 		cpu = NOCPU;
 		ts->ts_runq = &runq;
+		resource_fire_net(td, TRAN_QUEUE_GLOBAL, "sched_add");
 	}
 
 	if ((td->td_flags & TDF_NOLOAD) == 0)
@@ -1446,8 +1446,11 @@ sched_rem(struct thread *td)
 	if ((td->td_flags & TDF_NOLOAD) == 0)
 		sched_load_rem();
 #ifdef SMP
-	if (ts->ts_runq != &runq)
+	if (ts->ts_runq != &runq) {
 		runq_length[ts->ts_runq - runq_pcpu]--;
+		resource_fire_net(td, TRANSITION((ts->ts_runq - runq_pcpu), TRAN_REMOVE_QUEUE), "sched_rem");
+	} else 
+		resource_fire_net(td, TRAN_REMOVE_GLOBAL_QUEUE, "sched_add");
 #endif
 	runq_remove(ts->ts_runq, td);
 	TD_SET_CAN_RUN(td);
@@ -1460,26 +1463,54 @@ sched_rem(struct thread *td)
 struct thread *
 sched_choose(void)
 {
-	struct thread *td;
+	struct thread *td, *idletd;
 	struct runq *rq;
 
 	mtx_assert(&sched_lock,  MA_OWNED);
+
+	idletd = PCPU_GET(idlethread);
 #ifdef SMP
+	int cpu_n;
 	struct thread *tdcpu;
 
-	rq = &runq;
-	td = runq_choose_fuzz(&runq, runq_fuzz);
-	tdcpu = runq_choose(&runq_pcpu[PCPU_GET(cpuid)]);
+	cpu_n = PCPU_GET(cpuid);
 
-	if (td == NULL ||
+	rq = &runq; // Cola global
+	td = runq_choose_fuzz(&runq, runq_fuzz); // Selecciona un thread de la cola global
+	tdcpu = runq_choose(&runq_pcpu[cpu_n]); // Selecciona un thread de la cola de la CPU que está corriendo
+
+
+	if (is_cpu_suspended(cpu_n) || 
+		td == NULL ||
 	    (tdcpu != NULL &&
 	     tdcpu->td_priority < td->td_priority)) {
+		// Aca entro si
+		// 1) La CPU está suspendida
+		// 2) No hay threads en la cola global (el tdcpu puede ser null)
+		// 3) Existe un thread de la CPU y tiene mayor prioridad que el thread de la cola global
+
+		// Aca adentro el hilo SIEMPRE es el del CPU
 		CTR2(KTR_RUNQ, "choosing td %p from pcpu runq %d", tdcpu,
-		     PCPU_GET(cpuid));
+		     cpu_n);
 		td = tdcpu;
-		rq = &runq_pcpu[PCPU_GET(cpuid)];
+		rq = &runq_pcpu[cpu_n];
+
+		if (td) //active thread available
+			resource_fire_net(td, TRANSITION(cpu_n, TRAN_UNQUEUE), "sched_choose");
+		else if (is_cpu_suspended(cpu_n)) { //CPU suspended -> no active thread 
+			wakeup_if_needed(idletd);
+			resource_fire_net(idletd, TRANSITION(cpu_n, TRAN_EXEC_IDLE), "sched_choose_4");
+			return (idletd);
+		}
 	} else {
-		CTR1(KTR_RUNQ, "choosing td_sched %p from main runq", td);
+		// Acá se llega solo si NO hay hilos en la cola del CPU y el procesador NO está suspendido, basicamente no hace nada
+		// y llega hasta el fondo retornando el idlethread
+		if (cpu_available_for_proc(td->td_proc->p_pid, cpu_n)) {
+			// El td es el de la cola global y se continua la ejecución
+			CTR1(KTR_RUNQ, "choosing td_sched %p from main runq", td);
+			resource_fire_net(td, TRANSITION(cpu_n, TRAN_FROM_GLOBAL_CPU), "sched_choose");
+		} else //si la cpu no esta disponible para el hilo hago que se ejecute idlethread?
+			td = NULL;
 	}
 
 #else
@@ -1490,7 +1521,7 @@ sched_choose(void)
 	if (td) {
 #ifdef SMP
 		if (td == tdcpu)
-			runq_length[PCPU_GET(cpuid)]--;
+			runq_length[cpu_n]--;
 #endif
 		runq_remove(rq, td);
 		td->td_flags |= TDF_DIDRUN;
@@ -1499,7 +1530,10 @@ sched_choose(void)
 		    ("sched_choose: thread swapped out"));
 		return (td);
 	}
-	return (PCPU_GET(idlethread));
+
+	wakeup_if_needed(idletd);
+	resource_fire_net(idletd, TRANSITION(cpu_n, TRAN_EXEC_IDLE), "sched_choose_3");
+	return (idletd);
 }
 
 void
@@ -1685,10 +1719,16 @@ sched_throw(struct thread *td)
 		MPASS(td->td_lock == &sched_lock);
 		td->td_lastcpu = td->td_oncpu;
 		td->td_oncpu = NOCPU;
+		resource_expulse_thread(td, SW_VOL, "sched_throw");	
 	}
 	mtx_assert(&sched_lock, MA_OWNED);
 	KASSERT(curthread->td_md.md_spinlock_count == 1, ("invalid count"));
-	cpu_throw(td, choosethread());	/* doesn't return */
+	
+	struct thread *newtd;
+	newtd = choosethread();
+	resource_fire_net(newtd, TRANSITION(PCPU_GET(cpuid), TRAN_EXEC), "sched_throw");
+
+	cpu_throw(td, newtd);	/* doesn't return */
 }
 
 void
