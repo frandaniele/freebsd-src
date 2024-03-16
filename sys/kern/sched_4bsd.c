@@ -35,8 +35,6 @@
  */
 
 #include <sys/cdefs.h>
-__FBSDID("$FreeBSD$");
-
 #include "opt_hwpmc_hooks.h"
 #include "opt_sched.h"
 
@@ -1029,9 +1027,8 @@ sched_switch(struct thread *td, int flags)
 	} else {
 		if (TD_IS_RUNNING(td)) {
 			/* Put us back on the run queue. */
-			sched_add(td, preempted ?
-			    SRQ_HOLDTD|SRQ_OURSELF|SRQ_YIELDING|SRQ_PREEMPTED :
-			    SRQ_HOLDTD|SRQ_OURSELF|SRQ_YIELDING);
+			sched_add(td, SRQ_HOLDTD | SRQ_OURSELF | SRQ_YIELDING |
+			    (preempted ? SRQ_PREEMPTED : 0));
 		}
 	}
 
