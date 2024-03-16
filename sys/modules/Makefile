@@ -88,6 +88,7 @@ SUBDIR=	\
 	${_cpsw} \
 	${_cpuctl} \
 	${_cpufreq} \
+	cpu_stats \
 	${_crypto} \
 	${_cryptodev} \
 	ctl \
@@ -385,8 +386,10 @@ SUBDIR=	\
 	tarfs \
 	tcp \
 	${_ti} \
+	thread_stats \
 	tmpfs \
 	${_toecore} \
+	toggle_active_cpu \
 	${_tpm} \
 	tws \
 	uart \
