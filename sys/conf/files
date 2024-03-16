@@ -5221,6 +5221,10 @@ security/mac_veriexec/mac_veriexec_sha1.c		optional mac_veriexec_sha1
 security/mac_veriexec/mac_veriexec_sha256.c		optional mac_veriexec_sha256
 security/mac_veriexec/mac_veriexec_sha384.c		optional mac_veriexec_sha384
 security/mac_veriexec/mac_veriexec_sha512.c		optional mac_veriexec_sha512
+stats/thread_stats.c 		optional sched_stats
+stats/cpu_stats.c 			optional sched_stats
+stats/toggle_active_cpu.c	optional sched_stats
+stats/modlib.c				optional sched_stats
 teken/teken.c			optional sc !SC_NO_TERM_TEKEN | vt
 ufs/ffs/ffs_alloc.c		optional ffs
 ufs/ffs/ffs_balloc.c		optional ffs
