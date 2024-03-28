@@ -1361,15 +1361,17 @@ sched_add(struct thread *td, int flags)
 	 * as per-CPU state may not be initialized yet and we may crash if we
 	 * try to access the per-CPU run queues.
 	 */
+	int boundcpu = ts->ts_runq - &runq_pcpu[0];
 	if (smp_started && (td->td_pinned != 0 || td->td_flags & TDF_BOUND ||
 	    ts->ts_flags & TSF_AFFINITY)) {
-		if (td->td_pinned != 0)
+		if (td->td_pinned != 0) 
 			cpu = td->td_lastcpu;
-		else if (td->td_flags & TDF_BOUND) {
+		else if (td->td_flags & TDF_BOUND && 
+				transition_is_sensitized(TRANSITION(boundcpu, TRAN_ADDTOQUEUE))) {
 			/* Find CPU from bound runq. */
 			KASSERT(SKE_RUNQ_PCPU(ts),
 			    ("sched_add: bound td_sched not on cpu runq"));
-			cpu = ts->ts_runq - &runq_pcpu[0];
+			cpu = boundcpu;
 		} else
 			/* Find a valid CPU for our cpuset */
 			cpu = sched_pickcpu(td);

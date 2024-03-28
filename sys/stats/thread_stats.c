@@ -78,6 +78,7 @@ read_thread_stats(void)
 {
 	struct proc *p;
     static int num_procs = -1;
+    static int log_count = 0;
 
     //reset aux struct (except metadata info)
     stats_aux.estcpu_idle = 0;
@@ -115,7 +116,10 @@ read_thread_stats(void)
     // Update the "published" struc
     memcpy(&threads_stats, &stats_aux, sizeof(struct threads_stats));
 
-    log_threads_stats();
+    if (log_count++ >= 9) {
+        log_threads_stats();
+        log_count = 0;
+    }
 }
 
 void 

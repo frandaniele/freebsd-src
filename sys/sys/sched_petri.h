@@ -84,6 +84,7 @@ bool cpu_available_for_proc(int proc_id, int cpu);
 bool is_cpu_suspended(int cpu_n);
 void get_monopolized_cpus(int *dst);
 void free_double_pointer(void** pointer, int rows); 
+bool transition_is_sensitized(int transition_index);
 void **init_double_pointer(int rows, int cols, size_t size); 
 void *init_pointer(size_t size); 
 void init_resource_net(void);

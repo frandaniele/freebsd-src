@@ -82,7 +82,6 @@ static void resource_fire_single_transition(struct thread *pt, int transition_in
 int get_monopolized_cpu_by_proc_id(int proc_id);
 bool toggle_active_cpu(int cpu, bool turn_off);
 bool toggle_pin_cpu_to_proc(int proc_id, int cpu, bool release);
-bool transition_is_sensitized(int transition_index);
 void allocate_resource_net(void);
 void init_cpu_mark(int cpu_n);
 void init_cpu_matrix(int cpu_n);
@@ -302,10 +301,8 @@ resource_choose_cpu(struct thread* td)
 	proc_id = td->td_proc->p_pid;
 
 	monopolized_cpu = get_monopolized_cpu_by_proc_id(proc_id);
-	if (monopolized_cpu != -1) {
-		log(LOG_INFO, "%s (td %d): CHOOSING MONOPOLIZED CPU%d\n", td->td_proc->p_comm, td->td_tid, monopolized_cpu);
+	if (monopolized_cpu != -1)
 		return TRANSITION(monopolized_cpu, TRAN_ADDTOQUEUE);
-	}
 	
 	last_cpu = td->td_lastcpu;
 	if (last_cpu != NOCPU && 
@@ -398,15 +395,8 @@ toggle_pin_cpu_to_proc(int proc_id, int cpu, bool release)
 		return true;
 	}
 
-	if (!cpu_available_for_proc(proc_id, cpu)) {
-		log(LOG_WARNING, "pin_cpu_to_proc error - CPU %d already monopolized\n", cpu);
+	if (!cpu_available_for_proc(proc_id, cpu) || is_cpu_suspended(cpu) || (proc_id < 1))
 		return false;
-	}
-
-	if (is_cpu_suspended(cpu)) {
-		log(LOG_WARNING, "pin_cpu_to_proc error - CPU %d suspended\n", cpu);
-		return false;
-	}
 		
 	monopolized_cpus_per_proc[cpu] = proc_id; //monopolize
 	log(LOG_INFO, "CPU %d monopolized by Process %2d\n", cpu, proc_id);
