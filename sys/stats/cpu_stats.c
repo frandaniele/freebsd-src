@@ -4,7 +4,7 @@
 #include <sys/smp.h>
 
 struct cpu_core_stats *cpu_stats = NULL;
-int cpu_load_last_min;
+//int cpu_load_last_min;
 
 /* funcion que permite publicar una struct de valor dinamico para acceder mediante sysctl */
 static int sysctl_get_cpu_stats(SYSCTL_HANDLER_ARGS) {
@@ -17,9 +17,8 @@ static int sysctl_get_cpu_stats(SYSCTL_HANDLER_ARGS) {
 SYSCTL_PROC(_kern_sched_stats, OID_AUTO, cpu_stats, CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_MPSAFE,
     0, 0, sysctl_get_cpu_stats, "A", "proc to share cpu stats structs");
 
-SYSCTL_INT(_kern_sched_stats, OID_AUTO, cpu_load_last_min, CTLFLAG_RD,
-            &cpu_load_last_min, 0, "loadavg of sys in last minute");
-
+//SYSCTL_INT(_kern_sched_stats, OID_AUTO, cpu_load_last_min, CTLFLAG_RD,
+//            &cpu_load_last_min, 0, "loadavg of sys in last minute");
 
 void        calc_cpu_stats(int cpu, long *cp_time);
 void        log_cpu_stats(int cpu);
@@ -73,18 +72,25 @@ void
 read_cpu_stats(void)
 {
     int cpu;
+    static int log_count = 0;
 
-    log(LOG_INFO | LOG_LOCAL1, "****************** READ_CPU_STATS *****************\n");
+    if (log_count >= 9)
+        log(LOG_INFO | LOG_LOCAL1, "****************** READ_CPU_STATS *****************\n");
 
     CPU_FOREACH(cpu) {
         struct pcpu *pcpu = pcpu_find(cpu);
 
         calc_cpu_stats(cpu, pcpu->pc_cp_time);
-        log_cpu_stats(cpu);
+    
+        if (log_count >= 9)
+            log_cpu_stats(cpu);
     }
 
+    if (log_count++ >= 9)
+        log_count = 0;
+
     //permite calcular la carga usando loadavg. ldavg[0] es la carga en el ultimo minuto.
-    cpu_load_last_min = (averunnable.ldavg[0]* 100 + FSCALE / 2) >> FSHIFT;//falta dividir por 100
+    //cpu_load_last_min = (averunnable.ldavg[0]* 100 + FSCALE / 2) >> FSHIFT;
 }
 
 /*
