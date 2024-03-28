@@ -30,7 +30,7 @@ static int MAX_TURNED_OFF;
 
 bool *turned_off_cpus;
 
-int cpus_requested = 0;
+int cpus_requested = 0;//max(processes_monopolizing, CPU_NUMBER)
 int check = 0;//check "stability" of low load measures 
 int stats_score = 0;
 
@@ -86,7 +86,11 @@ static int event_handler(struct module *module, int event, void *arg) {
 static void
 timer_callback_monopolization(void *arg)
 {
+    static int monopolized = 0;
+
+    //este arreglo contiene los pid de los CPU_NUMBER procesos de mayor prioridad que quieren monopolizar
     int *monopolization_pids = (int *)init_pointer(CPU_NUMBER * sizeof(int));
+
     cpus_requested = get_monopolization_info(monopolization_pids);
 
     int *cpus = (int *)init_pointer(CPU_NUMBER * sizeof(int));
@@ -94,12 +98,12 @@ timer_callback_monopolization(void *arg)
 
     //release monopolized cpus if the pid it belongs to isnt in the most prioritized
     for (int n_cpu = 1; n_cpu < CPU_NUMBER; n_cpu++) {
-        if (cpus[n_cpu] == -1)//if not monopolized, continue
+        if (cpus[n_cpu] == -1 || is_cpu_suspended(n_cpu))//if not monopolized or is_susp, continue
             continue; 
 
         bool keep = false;
-        for (int j = 1; j < CPU_NUMBER; j++) {//check if proc that monopolizes this cpu is still prioritized
-            if (cpus[n_cpu] == monopolization_pids[j - 1]) {
+        for (int j = 0; j < CPU_NUMBER; j++) {//check if proc that monopolizes this cpu is still prioritized
+            if (cpus[n_cpu] == monopolization_pids[j]) {
                 keep = true;
                 break;
             }
@@ -108,24 +112,34 @@ timer_callback_monopolization(void *arg)
         if (!keep) {
             release_cpu(cpus[n_cpu], n_cpu);
             log(LOG_INFO | LOG_LOCAL2, "CPU %d released by %d\n", n_cpu, cpus[n_cpu]);
+            monopolized--;
         }
     }
 
+    //monopolize cpu
     if (cpus_requested > 0) {
         //for now, only one cpu can be monopolized (cpu 1). it needs to be improved.
-        for (int n_cpu = 1; n_cpu < MAX_TURNED_OFF + 1; n_cpu++) {//skip cpu 0
-            if (cpus[n_cpu] == -1) {
-                if (monopolize_cpu(monopolization_pids[n_cpu - 1], n_cpu)) //minus 1 because highest priority is in index 0
+        for (int n_cpu = 1; n_cpu < CPU_NUMBER; n_cpu++) {//skip cpu 0
+            if ((cpus[n_cpu] == -1) && !is_cpu_suspended(n_cpu) && (monopolized < MAX_TURNED_OFF)) {
+                if (monopolize_cpu(monopolization_pids[n_cpu - 1], n_cpu)) {//minus 1 because started in index 1
                     log(LOG_INFO | LOG_LOCAL2, "CPU %d monopolized by %d\n", n_cpu, monopolization_pids[n_cpu - 1]);
+                    monopolized++;
+                }
             }
         }
     }
 
+    free(monopolization_pids, M_DEVBUF);
     free(cpus, M_DEVBUF);
 
     callout_schedule(&timer_monopolization, monopolization_interval_sec*hz);
 }
 
+/**
+ * cada 1s recopilo estadisticas
+ * de uso de cpu y necesidades de usuario
+ * y calculo el score
+*/
 static void 
 timer_callback_stats(void *arg) 
 {
@@ -148,18 +162,20 @@ static void
 timer_callback_turn_off(void *arg) 
 {
     
-    if ((stats_score < LOAD_NORMAL)  && (cpus_requested < 1)) {
+    if ((stats_score < LOAD_NORMAL) && (cpus_requested < 1)) {
         
         if (check++ >= 3) {//if there isnt a process that request a cpu & at least 90 secs with low load
             check = 0;//reset count of times obtaining a low load measure
             
-            int idlest_cpu = get_idlest_cpu();
+            if (get_n_turned_off() < MAX_TURNED_OFF) {
+                int idlest_cpu = get_idlest_cpu();
 
-            if ((idlest_cpu > 0) && (get_n_turned_off() < MAX_TURNED_OFF)) {
-                turn_off_cpu(idlest_cpu);
-                turned_off_cpus[idlest_cpu] = true;
+                if (idlest_cpu > 0) {
+                    turn_off_cpu(idlest_cpu);
+                    turned_off_cpus[idlest_cpu] = true;
 
-                log(LOG_INFO | LOG_LOCAL2, "CPU %d turned off\n", idlest_cpu);
+                    log(LOG_INFO | LOG_LOCAL2, "CPU %d turned off\n", idlest_cpu);
+                }
             }
         }
     } 
@@ -167,6 +183,10 @@ timer_callback_turn_off(void *arg)
     callout_schedule(&timer_turn_off, turn_off_interval_sec*hz);
 }
 
+/**
+ * cada ~2s si hay carga o alguien quiere monopolizar
+ * chequeo si hay core suspendido y prendo de ser necesario
+*/
 static void 
 timer_callback_turn_on(void *arg) 
 {
@@ -336,10 +356,8 @@ get_user_load(void)
         return LOAD_NORMAL; //exception, discard measure
 
     for (int i = 0; i < CPU_NUMBER; i++) {
-        if (cpu_stats[i].delta_total <= 0)
-            return LOAD_NORMAL; //exception, discard measure
-
-        cpus_user_pct_load[i] = (cpu_stats[i].delta[CP_USER]*100) / cpu_stats[i].delta_total;
+        //if delta_total is 0 or less, the pct used is 0, if not calculate it
+        cpus_user_pct_load[i] = cpu_stats[i].delta_total <= 0 ? 0 : (cpu_stats[i].delta[CP_USER]*100) / cpu_stats[i].delta_total;
     }
 
     free(cpu_stats, M_DEVBUF);
@@ -357,7 +375,6 @@ get_user_load(void)
 /* 
  * posibilidad de usar en lugar de get_user_load
  * https://forums.freebsd.org/threads/load-average-calculation.72066/ 
- * cuando apago alguno, el loadavg empieza a subir. hay que estudiar un poco esto
  */
 int
 get_sys_load(void)
